@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+
+"""
+Nifty Incisive Text Open at Point
+=================================
+
+nito-at-point
+
+All arguments are files to edit, configuring the editor to call is done via an environment variable.
+
+If you want to use a single editor, simply use:
+   NITOATPOINT_CFG="emacs"
+Or:
+   NITOATPOINT_CFG="emacs=regex;gvim=regex;scite="
+
+Blank regex arg is used for all files that don't match.
+"""
+
+import sys
+import os
+
+from shlex import quote
+
+
+class open_editor_impl:
+    # fake module
+    __slots__ = ()
+
+    def __new__(cls, *args, **kwargs):
+        raise RuntimeError(f"{cls!r}" " should not be instantiated")
+
+    @staticmethod
+    def emacs(filename, num, col):
+        return (
+            "emacsclient",
+            "--eval",
+            "(progn (find-file " f"\"{filename}\"" ") "
+            "(goto-line " f"{num}" ") " + (
+                "(back-to-indentation) "
+                if col is None else
+                "(forward-char " f"{max(0, col - 1)}" ") "
+            ) + "(recenter)"
+            ")",
+            '--no-wait',
+            '--alternate-editor=emacs --eval',
+        ), {"EMACS_USE_SERVER": "1"}
+
+    @staticmethod
+    def gvim(filename, num, col):
+        # TODO, center the view (press 'zz')
+        if col is None:
+            col = 0
+        return (
+            "gvim",
+            "--remote-silent",
+            "+cal cursor(" f"{num},{col}" ")",
+            quote(filename),
+        ), None
+
+    @staticmethod
+    def scite(filename, num, _):
+        return (
+            "scite",
+            quote(filename),
+            "-goto:" f"{num:d}",
+        ), None
+
+    @staticmethod
+    def qtcreator(filename, num, _):
+        return (
+            "qtcreator",
+            "-client",
+            quote(filename) + f"+{num}",
+        ), None
+
+    @staticmethod
+    def geany(filename, num, _):
+        return (
+            "geany",
+            quote(filename) + f"+{num}",
+        ), None
+
+    @staticmethod
+    def gedit(filename, num, _):
+        return (
+            "gedit",
+            quote(filename),
+            f"+{num}",
+        ), None
+
+
+def filepath_find_recursive_glob(root, match):
+    """
+    Replacement for 'find -name ...' command line tool.
+    """
+    import fnmatch
+    import re
+    re_text = fnmatch.translate(match)
+    re_comp = re.compile(re_text)
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # skip '.git'
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for filename in filenames:
+            if re_comp.match(filename):
+                filepath = os.path.join(dirpath, filename)
+                yield filepath
+
+
+def filepath_resolve_vcs_root(path, search=None):
+    if search is None:
+        search = {".git", ".svn", ".cvs", ".hg", ".bzr"}
+
+    while True:
+        for d in search:
+            if os.path.exists(os.path.join(path, d)):
+                return path
+        path_next = os.path.normpath(os.path.join(path, ".."))
+        if path == path_next:
+            break
+        path = path_next
+
+    return None
+
+
+def default_text_editor():
+    var = os.environ.get("UI_EDITOR")
+    if var is not None:
+        if var.startswith("emacs"):
+            return "emacs", {"EMACS_USE_SERVER": "1"}
+        elif var.startswith("gvim"):
+            return "gvim", None
+
+    # fallback
+    return "gvim", None
+
+
+def cmd_exists(cmd):
+    import subprocess
+    return (subprocess.call(
+        "type " + cmd, shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) == 0)
+
+
+def open_editor(filename, num, col, editor):
+    editor_fn = getattr(open_editor_impl, editor, None)
+    if editor_fn is None:
+        print(
+            "Error:",
+            repr(editor),
+            "not found in:",
+            repr(tuple(sorted(n for n in dir(open_editor_impl) if not n.startswith("__")))),
+        )
+        return
+
+    cmd, env = editor_fn(filename, num, col)
+    if env:
+        os.environ.update(env)
+
+    print(cmd)
+    import subprocess
+    process = subprocess.Popen(
+        cmd,
+    )
+    # process.wait()
+    # _, stderr = process.communicate()
+    # if stderr:
+        # print(stderr)
+
+
+def run_as_lines(cmd):
+    import subprocess
+    process = subprocess.Popen(
+        cmd,
+        # stdout=subprocess.PIPE,
+        # stderr=subprocess.PIPE,
+        shell=True,
+    )
+    # stdout, stderr = process.communicate()
+    # return stdout.decode('utf-8').split("\n")
+    process.wait()
+
+
+def filepath_resolve_find(filename, cwd):
+    if os.path.exists(filename):
+        return os.path.abspath(filename)
+
+    filename_test = os.path.join(cwd, filename)
+    if os.path.exists(filename_test):
+        return os.path.abspath(filename_test)
+    del filename_test
+
+    filename_base = os.path.basename(filename)
+    filename_found = None
+
+    # Sorting isn't essential, just give predictable results.
+    matches = list(sorted(filepath_find_recursive_glob(cwd, filename_base)))
+
+    for l in matches:
+        # strip '.' so as to allow relative paths "./foo/bar"
+        if l.endswith(filename.lstrip(".")):
+            filename_found = l
+            break
+
+    # use glob, if we only found a single match
+    if filename_found is None:
+        import fnmatch
+        import re
+
+        re_ls = (
+            re.compile(fnmatch.translate("*" + os.sep + filename.lstrip(os.sep))),
+            re.compile(fnmatch.translate("*" + filename)),
+        )
+        del fnmatch
+
+        for re_comp in re_ls:
+            for l in matches:
+                if re_comp.match(l):
+                    filename_found = l
+                    break
+        del re
+        del re_ls, re_comp
+    del matches
+
+    # maybe None
+    return filename_found
+
+
+def filename_resolve(filename):
+
+    def root_dirs():
+        cwd = os.getcwd()
+        yield cwd
+
+        # use VCS root, so we can paste paths from 'git diff' output.
+        cwd_vcs = filepath_resolve_vcs_root(cwd)
+        if cwd_vcs is not None and cwd != cwd_vcs:
+            yield cwd_vcs
+
+    root_dirs_checked = []
+    for cwd in root_dirs():
+        root_dirs_checked.append(cwd)
+        filename_found = filepath_resolve_find(filename, cwd)
+        if filename_found is not None:
+            return filename_found
+
+    print("Error %r not found in %r" % (filename, root_dirs_checked))
+
+    return None
+
+
+def main():
+
+    def filename_no_parse(argv):
+
+        # check python style:
+        #
+        #    File "/src/_bam_venv/lib/python3.4/site-packages/flask/app.py", line 1461,
+        try:
+            i = argv.index("line")
+        except:
+            i = -1
+
+        if i != -1:
+            yield argv[i - 1].rstrip(",").strip("'\""), int(argv[i + 1].strip(",")), 0
+            # recurse!
+            yield from filename_no_parse(argv[2:])
+            return
+
+        # check gcc style:
+        #
+        #    /some/file.c:123
+        #
+        # .. or include column
+        #    /some/file.c:123:4
+        for arg in argv:
+            if ":" in arg:
+                filename, num = arg.split(":", 1)
+                # incase there are multiple (we could parse)
+                num_col = num.split(":")
+                num = num_col[0]
+                if len(num_col) > 1:
+                    col = num_col[1]
+                # incase we have trailing junk (comma is common)
+                junk = "`!@#$%^&*()-=[];'\"?,."
+                num = num.strip(junk)
+                if num:
+                    num = int(num)
+                else:
+                    num = None
+                # col can be an empty string
+                if len(num_col) > 1 and col:
+                    col = col.strip(junk)
+
+                    # fairly common that the second word is not an int, eg:
+                    #
+                    #     /some/file.c:123:void main()
+                    if col.isdigit():
+                        col = int(col)
+                    else:
+                        col = None
+                else:
+                    col = None
+            else:
+                filename, num, col = arg, None, None
+
+            if num is None:
+                num = 1
+            if col is None:
+                col = None
+
+            yield filename, num, col
+
+    # Strip color/control characters,
+    # add more as needed
+    argv = [
+        a.replace(
+            '\x1b(B', '',
+        ).replace(
+            '\x1b[m', '',
+        ).replace(
+            '\x1b[0m', '',
+        ) for a in sys.argv
+    ]
+
+    def editor_from_filename(filename):
+        import re
+        nameonly = os.path.basename(filename)
+        cfg = os.environ.get("NITOATPOINT_CFG")
+
+        # TODO, check all commands, use first that works.
+        if cfg is None:
+            return "gvim"
+
+        for editor_pattern in cfg.split(";"):
+            editor, pattern = editor_pattern.partition("=")[::2]
+            if not pattern:
+                return editor
+            if re.match(pattern, nameonly) is not None:
+                return editor
+            print(m)
+        raise Exception("No editor for " f"{nameonly}" " set 'NITOATPOINT_CFG'")
+
+    for filename, num, col in filename_no_parse(argv[1:]):
+        # Some convenient replacements.
+        if not os.path.exists(filename):
+            if filename.startswith(("a/", "b/")):
+                filename = filename[2:]
+
+        filename = filename_resolve(filename)
+
+        if filename is None:
+            return
+
+        editor = editor_from_filename(filename)
+
+        open_editor(filename, num, col, editor)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
