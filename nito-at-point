@@ -39,8 +39,9 @@ class open_editor_impl:
                 "(back-to-indentation) "
                 if col is None else
                 "(forward-char " f"{max(0, col - 1)}" ") "
+                " "
             ) + "(recenter)"
-            ")",
+            " \"\")",
             '--no-wait',
             '--alternate-editor=emacs --eval',
         ), {"EMACS_USE_SERVER": "1"}
@@ -159,7 +160,7 @@ def open_editor(filename, num, col, editor):
     if env:
         os.environ.update(env)
 
-    print(cmd)
+    # print(cmd)
     import subprocess
     process = subprocess.Popen(
         cmd,
@@ -332,7 +333,7 @@ def main():
 
         # TODO, check all commands, use first that works.
         if cfg is None:
-            return "gvim"
+            return "emacs"
 
         for editor_pattern in cfg.split(";"):
             editor, pattern = editor_pattern.partition("=")[::2]
@@ -340,7 +341,6 @@ def main():
                 return editor
             if re.match(pattern, nameonly) is not None:
                 return editor
-            print(m)
         raise Exception("No editor for " f"{nameonly}" " set 'NITOATPOINT_CFG'")
 
     for filename, num, col in filename_no_parse(argv[1:]):
