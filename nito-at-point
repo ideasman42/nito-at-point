@@ -34,14 +34,16 @@ class open_editor_impl:
         return (
             "emacsclient",
             "--eval",
-            "(progn (find-file " f"\"{filename}\"" ") "
-            "(goto-line " f"{num}" ") " + (
+            "(progn (find-file " f"\"{filename}\"" ") " + (
+                "" if num is None else
+                "(goto-line " f"{num}" ") "
+            ) + (
                 "(back-to-indentation) "
                 if col is None else
                 "(forward-char " f"{max(0, col - 1)}" ") "
                 " "
-            ) + "(recenter)"
-            " \"\")",
+            ) + "(recenter) "
+            "\"\")",
             '--no-wait',
             '--alternate-editor=emacs --eval',
         ), {"EMACS_USE_SERVER": "1"}
@@ -54,7 +56,7 @@ class open_editor_impl:
         return (
             "gvim",
             "--remote-silent",
-            "+cal cursor(" f"{num},{col}" ")",
+            *(() if num is None else ("+cal cursor(" f"{num},{col}" ")",),),
             quote(filename),
         ), None
 
@@ -63,7 +65,7 @@ class open_editor_impl:
         return (
             "scite",
             quote(filename),
-            "-goto:" f"{num:d}",
+            *(() if num is None else ("-goto:" f"{num:d}",),),
         ), None
 
     @staticmethod
@@ -71,14 +73,14 @@ class open_editor_impl:
         return (
             "qtcreator",
             "-client",
-            quote(filename) + f"+{num}",
+            quote(filename) + ("" if num is None else f"+{num}"),
         ), None
 
     @staticmethod
     def geany(filename, num, _):
         return (
             "geany",
-            quote(filename) + f"+{num}",
+            quote(filename) + ("" if num is None else f"+{num}"),
         ), None
 
     @staticmethod
@@ -86,7 +88,7 @@ class open_editor_impl:
         return (
             "gedit",
             quote(filename),
-            f"+{num}",
+            *(() if num is None else (f"+{num}",),)
         ), None
 
 
@@ -307,11 +309,7 @@ def main():
             else:
                 filename, num, col = arg, None, None
 
-            if num is None:
-                num = 1
-            if col is None:
-                col = None
-
+            # Both num and col may be None, if not passed in.
             yield filename, num, col
 
     # Strip color/control characters,
